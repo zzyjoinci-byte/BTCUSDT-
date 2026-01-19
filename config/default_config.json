@@ -1,0 +1,43 @@
+{
+  "env": "mainnet",
+  "symbols": ["BTCUSDT", "SOLUSDT"],
+  "default_symbol": "SOLUSDT",
+  "trade_mode": "both",
+  "start_date": "2022-01-01",
+  "end_date": "2026-01-01",
+  "exec_tf": "4h",
+  "filter_tf": "1d",
+  "initial_capital": 10000,
+  "fee_rate": 0.0004,
+  "slippage_rate": 0.0003,
+  "slippage_presets": {
+    "BTCUSDT": 0.0001,
+    "SOLUSDT": 0.0003
+  },
+  "risk": {
+    "risk_per_trade_long": 0.006,
+    "risk_per_trade_short": 0.004,
+    "max_notional_pct_short": 0.35
+  },
+  "v5": {
+    "rsi_length": 14,
+    "macd_fast": 12,
+    "macd_slow": 26,
+    "macd_signal": 9,
+    "boll_length": 20,
+    "boll_std": 2.0,
+    "ema_fast": 50,
+    "ema_slow": 200,
+    "adx_length": 14,
+    "bear_adx_threshold": 25,
+    "ema_slope_lookback": 5,
+    "atr_length": 14,
+    "atr_init_mult": 2.6,
+    "atr_trail_mult": 2.8,
+    "tp2_invalid_min_pnl_pct_long": 0.002,
+    "tp2_invalid_min_pnl_pct_short": 0.008,
+    "tp2_invalid_min_hold_bars": 16,
+    "tp2_invalid_action": "tighten_stop",
+    "tighten_to": "mid"
+  }
+}
