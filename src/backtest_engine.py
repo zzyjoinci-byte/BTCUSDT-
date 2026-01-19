@@ -26,7 +26,7 @@ def run_backtest(
     progress_cb: Optional[Callable[[int, int], None]] = None,
     stop_flag: Optional[Callable[[], bool]] = None,
 ) -> Tuple[pd.DataFrame, pd.DataFrame, Dict[str, object]]:
-    df = build_signals(df)
+    df = build_signals(df, config.get("v5", {}))
     df = df.dropna().reset_index(drop=True)
     if df.empty:
         return pd.DataFrame(), pd.DataFrame(), {"error": "数据为空"}
@@ -66,12 +66,25 @@ def run_backtest(
         "beargate_pass": 0,
         "beargate_fail": 0,
         "beargate_short_blocked": 0,
+        "entry_adx_block_long_count": 0,
+        "entry_adx_block_short_count": 0,
     }
 
     cash = initial_capital
     position: Optional[Position] = None
     trades: List[Dict[str, object]] = []
     equity_curve: List[Dict[str, object]] = []
+
+    adx_quantiles = {}
+    if "adx_4h" in df.columns:
+        series = df["adx_4h"].dropna()
+        if not series.empty:
+            q = series.quantile([0.25, 0.5, 0.75]).to_dict()
+            adx_quantiles = {
+                "p25": float(q.get(0.25, 0.0)),
+                "p50": float(q.get(0.5, 0.0)),
+                "p75": float(q.get(0.75, 0.0)),
+            }
 
     for i, row in df.iterrows():
         if stop_flag and stop_flag():
@@ -151,39 +164,45 @@ def run_backtest(
                 position = None
 
         if position is None:
-            if bool(row["long_signal"]):
+            if bool(row["long_candidate"]):
                 counters["candidates_long"] += 1
                 if allow_long and not range_filter.iloc[i]:
-                    entry_price = row["close"] * (1 + slippage)
-                    recent_low = df.loc[max(0, i - 4) : i, "low"].min()
-                    atr_stop = entry_price - row["atr"] * v5["atr_init_mult"]
-                    structure_stop = recent_low
-                    stop_price = max(atr_stop, structure_stop)
-                    qty = calculate_position_size(
-                        cash,
-                        risk["risk_per_trade_long"],
-                        entry_price,
-                        stop_price,
-                        None,
-                    )
-                    if qty > 0:
-                        fee = entry_price * qty * fee_rate
-                        cash -= fee
-                        position = Position(
-                            side="LONG",
-                            entry_price=entry_price,
-                            qty=qty,
-                            stop_price=stop_price,
-                            entry_time=int(row["open_time"]),
+                    if not bool(row.get("entry_adx_ok_long", True)):
+                        counters["entry_adx_block_long_count"] += 1
+                        pass
+                    else:
+                        entry_price = row["close"] * (1 + slippage)
+                        recent_low = df.loc[max(0, i - 4) : i, "low"].min()
+                        atr_stop = entry_price - row["atr"] * v5["atr_init_mult"]
+                        structure_stop = recent_low
+                        stop_price = max(atr_stop, structure_stop)
+                        qty = calculate_position_size(
+                            cash,
+                            risk["risk_per_trade_long"],
+                            entry_price,
+                            stop_price,
+                            None,
                         )
-                        counters["entries_long"] += 1
-                        counters["entries_total"] += 1
+                        if qty > 0:
+                            fee = entry_price * qty * fee_rate
+                            cash -= fee
+                            position = Position(
+                                side="LONG",
+                                entry_price=entry_price,
+                                qty=qty,
+                                stop_price=stop_price,
+                                entry_time=int(row["open_time"]),
+                            )
+                            counters["entries_long"] += 1
+                            counters["entries_total"] += 1
 
-            if position is None and bool(row["short_signal"]):
+            if position is None and bool(row["short_candidate"]):
                 counters["candidates_short"] += 1
                 if allow_short and not range_filter.iloc[i]:
                     if not bool(bear_pass.iloc[i]):
                         counters["beargate_short_blocked"] += 1
+                    elif not bool(row.get("entry_adx_ok_short", True)):
+                        counters["entry_adx_block_short_count"] += 1
                     else:
                         entry_price = row["close"] * (1 - slippage)
                         recent_high = df.loc[max(0, i - 4) : i, "high"].max()
@@ -268,5 +287,5 @@ def run_backtest(
 
     trades_df = pd.DataFrame(trades)
     equity_df = pd.DataFrame(equity_curve)
-    result = {"counters": counters}
+    result = {"counters": counters, "adx_4h_quantiles": adx_quantiles}
     return trades_df, equity_df, result

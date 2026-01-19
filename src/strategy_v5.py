@@ -6,9 +6,10 @@ import numpy as np
 import pandas as pd
 
 from indicators import adx, atr, bollinger, ema, macd, rsi
+from resample import resample_ohlcv, timeframe_to_minutes
 
 
-def prepare_exec_frame(df: pd.DataFrame, params: Dict[str, float]) -> pd.DataFrame:
+def prepare_exec_frame(df: pd.DataFrame, params: Dict[str, float], exec_tf: str = "4h") -> pd.DataFrame:
     df = df.copy()
     df["rsi"] = rsi(df["close"], params["rsi_length"])
     macd_line, macd_signal, macd_hist = macd(
@@ -25,6 +26,7 @@ def prepare_exec_frame(df: pd.DataFrame, params: Dict[str, float]) -> pd.DataFra
     df["ema_slow"] = ema(df["close"], params["ema_slow"])
     df["adx"] = adx(df["high"], df["low"], df["close"], params["adx_length"])
     df["atr"] = atr(df["high"], df["low"], df["close"], params["atr_length"])
+    df = _add_adx_4h(df, params, exec_tf)
     return df
 
 
@@ -54,22 +56,33 @@ def calc_range_filter(exec_df: pd.DataFrame) -> pd.Series:
     return exec_df["adx"] < 15
 
 
-def build_signals(exec_df: pd.DataFrame) -> pd.DataFrame:
+def build_signals(exec_df: pd.DataFrame, params: Dict[str, float] | None = None) -> pd.DataFrame:
     df = exec_df.copy()
-    df["long_signal"] = (
+    df["long_candidate"] = (
         (df["rsi"] > 50)
         & (df["macd_hist"] > 0)
         & (df["close"] > df["ema_fast"])
         & (df["ema_fast"] > df["ema_slow"])
         & (df["close"] > df["boll_mid"])
     )
-    df["short_signal"] = (
+    df["short_candidate"] = (
         (df["rsi"] < 50)
         & (df["macd_hist"] < 0)
         & (df["close"] < df["ema_fast"])
         & (df["ema_fast"] < df["ema_slow"])
         & (df["close"] < df["boll_mid"])
     )
+    if params and params.get("entry_adx_filter_enabled", False):
+        adx_4h = df.get("adx_4h", df.get("adx", pd.Series(np.nan, index=df.index)))
+        df["entry_adx_ok_long"] = adx_4h >= float(params.get("entry_adx_min_long", 0))
+        df["entry_adx_ok_short"] = adx_4h >= float(params.get("entry_adx_min_short", 0))
+        df["long_signal"] = df["long_candidate"] & df["entry_adx_ok_long"]
+        df["short_signal"] = df["short_candidate"] & df["entry_adx_ok_short"]
+    else:
+        df["entry_adx_ok_long"] = True
+        df["entry_adx_ok_short"] = True
+        df["long_signal"] = df["long_candidate"]
+        df["short_signal"] = df["short_candidate"]
     df["touch_long"] = df["low"] <= df["boll_lower"]
     df["touch_short"] = df["high"] >= df["boll_upper"]
     return df
@@ -108,3 +121,28 @@ def tp2_invalid_should_tighten(
     if hold_bars < min_hold_bars:
         return False, "hold_gate"
     return True, "allow"
+
+
+def _add_adx_4h(df: pd.DataFrame, params: Dict[str, float], exec_tf: str) -> pd.DataFrame:
+    period = int(params.get("entry_adx_period", params.get("adx_length", 14)))
+    if df.empty:
+        df["adx_4h"] = pd.Series(dtype=float)
+        return df
+    exec_minutes = timeframe_to_minutes(exec_tf)
+    if exec_minutes >= 240:
+        if "adx" in df.columns:
+            df["adx_4h"] = df["adx"]
+        else:
+            df["adx_4h"] = adx(df["high"], df["low"], df["close"], period)
+        return df
+    base_cols = ["open_time", "open", "high", "low", "close", "volume", "close_time"]
+    base = df[base_cols].sort_values("open_time")
+    resampled = resample_ohlcv(base, "4h")
+    resampled["adx_4h"] = adx(resampled["high"], resampled["low"], resampled["close"], period)
+    merged = pd.merge_asof(
+        df.sort_values("open_time"),
+        resampled[["open_time", "adx_4h"]].sort_values("open_time"),
+        on="open_time",
+        direction="backward",
+    )
+    return merged

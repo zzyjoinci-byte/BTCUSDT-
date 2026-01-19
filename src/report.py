@@ -75,6 +75,7 @@ def summarize(
     counters: Dict[str, int],
     config: Dict[str, object],
     symbol: str,
+    adx_4h_quantiles: Dict[str, float] | None = None,
 ) -> Dict[str, object]:
     if equity.empty:
         total_return = 0.0
@@ -142,6 +143,9 @@ def summarize(
         "exit_reason_pnl": exit_reason_pnl,
         "stop_breakdown": stop_breakdown,
         "side_breakdown": side_breakdown,
+        "entry_adx_block_long_count": int(counters.get("entry_adx_block_long_count", 0)),
+        "entry_adx_block_short_count": int(counters.get("entry_adx_block_short_count", 0)),
+        "adx_4h_quantiles": adx_4h_quantiles or {"p25": 0.0, "p50": 0.0, "p75": 0.0},
         "counters": counters,
         "config": {
             "exec_tf": config["exec_tf"],
