@@ -1,5 +1,5 @@
 {
-  "env": "mainnet",
+  "env": "testnet",
   "symbols": ["BTCUSDT", "SOLUSDT"],
   "default_symbol": "SOLUSDT",
   "trade_mode": "both",
@@ -43,5 +43,14 @@
     "entry_adx_period": 14,
     "entry_adx_min_long": 20,
     "entry_adx_min_short": 25
+  },
+  "live": {
+    "mode": "DRY-RUN",
+    "environment": "testnet",
+    "max_notional_usdt": 200,
+    "max_position_usdt": 500,
+    "cooldown_seconds": 60,
+    "kill_switch_max_errors": 3,
+    "poll_seconds": 30
   }
 }

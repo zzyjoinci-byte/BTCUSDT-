@@ -18,6 +18,8 @@ from PySide6.QtWidgets import (
     QGroupBox,
     QLabel,
     QLineEdit,
+    QInputDialog,
+    QMessageBox,
     QPushButton,
     QProgressBar,
     QScrollArea,
@@ -34,6 +36,7 @@ from matplotlib.figure import Figure
 
 from backtest_engine import run_backtest
 from binance_api import BinanceAPI, safe_api_call
+from live_trader import LiveTrader
 from data_store import (
     calc_missing_segments,
     calc_overlap_segments,
@@ -56,14 +59,14 @@ from strategy_v5 import prepare_exec_frame, prepare_filter_frame
 class ApiTestWorker(QObject):
     finished = Signal(dict)
 
-    def __init__(self, api_key: str, api_secret: str, testnet: bool) -> None:
+    def __init__(self, api_key: str, api_secret: str, environment: str) -> None:
         super().__init__()
         self.api_key = api_key
         self.api_secret = api_secret
-        self.testnet = testnet
+        self.environment = environment
 
     def run(self) -> None:
-        api = BinanceAPI(self.api_key, self.api_secret, self.testnet)
+        api = BinanceAPI(self.api_key, self.api_secret, self.environment)
         payload, error = safe_api_call(api.test_connection)
         if error:
             self.finished.emit({"ok": False, "error": error})
@@ -72,15 +75,58 @@ class ApiTestWorker(QObject):
             self.finished.emit(payload)
 
 
-class BacktestWorker(QObject):
+class BalanceWorker(QObject):
     finished = Signal(dict)
 
-    def __init__(self, config: Dict[str, object], api_key: str, api_secret: str, testnet: bool, state: AppState) -> None:
+    def __init__(self, api_key: str, api_secret: str, environment: str) -> None:
+        super().__init__()
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.environment = environment
+
+    def run(self) -> None:
+        api = BinanceAPI(self.api_key, self.api_secret, self.environment)
+        payload, error = safe_api_call(api.get_account_summary)
+        if error:
+            self.finished.emit({"ok": False, "error": error})
+        else:
+            payload["ok"] = True
+            self.finished.emit(payload)
+
+
+class LiveWorker(QObject):
+    finished = Signal(dict)
+    log_signal = Signal(str)
+
+    def __init__(self, config: Dict[str, object], api_key: str, api_secret: str, environment: str) -> None:
         super().__init__()
         self.config = config
         self.api_key = api_key
         self.api_secret = api_secret
-        self.testnet = testnet
+        self.environment = environment
+        self._stop_event = threading.Event()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+    def run(self) -> None:
+        api = BinanceAPI(self.api_key, self.api_secret, self.environment)
+        trader = LiveTrader(api, self.config, self.log_signal.emit, self._stop_event)
+        result = trader.run()
+        self.finished.emit(result or {"stopped": True})
+
+
+class BacktestWorker(QObject):
+    finished = Signal(dict)
+
+    def __init__(
+        self, config: Dict[str, object], api_key: str, api_secret: str, environment: str, state: AppState
+    ) -> None:
+        super().__init__()
+        self.config = config
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.environment = environment
         self.state = state
         self._stop_event = threading.Event()
 
@@ -100,7 +146,7 @@ class BacktestWorker(QObject):
         self.state.set_status("准备回测...")
         self.state.set_progress(0)
 
-        api = BinanceAPI(self.api_key, self.api_secret, self.testnet)
+        api = BinanceAPI(self.api_key, self.api_secret, self.environment)
         conn = open_db(os.path.join("data", "market.sqlite"))
         ensure_schema(conn)
 
@@ -264,6 +310,12 @@ class MainWindow(QWidget):
         self.worker_thread: Optional[QThread] = None
         self.worker: Optional[BacktestWorker] = None
         self.api_thread: Optional[QThread] = None
+        self.balance_thread: Optional[QThread] = None
+        self.api_worker: Optional[ApiTestWorker] = None
+        self.balance_worker: Optional[BalanceWorker] = None
+        self.live_thread: Optional[QThread] = None
+        self.live_worker: Optional[LiveWorker] = None
+        self._syncing_env = False
         self.last_export_paths = None
         self.spinner_frames = ["|", "/", "-", "\\"]
         self.spinner_index = 0
@@ -298,6 +350,32 @@ class MainWindow(QWidget):
         conn_layout.addWidget(self.conn_status, 3, 1)
         conn_layout.addWidget(self.conn_info, 4, 0, 1, 2)
         self.connection_group.setLayout(conn_layout)
+
+        self.account_group = QGroupBox("账户")
+        account_layout = QGridLayout()
+        self.account_env_combo = QComboBox()
+        self.account_env_combo.addItems(["Testnet", "Mainnet"])
+        self.account_env_combo.setCurrentText(self.env_combo.currentText())
+        self.refresh_balance_btn = QPushButton("刷新余额")
+        self.account_fingerprint = QLabel("-")
+        self.account_wallet = QLabel("-")
+        self.account_available = QLabel("-")
+        self.account_margin = QLabel("-")
+        self.account_unrealized = QLabel("-")
+        account_layout.addWidget(QLabel("环境"), 0, 0)
+        account_layout.addWidget(self.account_env_combo, 0, 1)
+        account_layout.addWidget(QLabel("Key 指纹"), 1, 0)
+        account_layout.addWidget(self.account_fingerprint, 1, 1)
+        account_layout.addWidget(self.refresh_balance_btn, 2, 0)
+        account_layout.addWidget(QLabel("walletBalance"), 3, 0)
+        account_layout.addWidget(self.account_wallet, 3, 1)
+        account_layout.addWidget(QLabel("availableBalance"), 4, 0)
+        account_layout.addWidget(self.account_available, 4, 1)
+        account_layout.addWidget(QLabel("marginBalance"), 5, 0)
+        account_layout.addWidget(self.account_margin, 5, 1)
+        account_layout.addWidget(QLabel("unrealizedProfit"), 6, 0)
+        account_layout.addWidget(self.account_unrealized, 6, 1)
+        self.account_group.setLayout(account_layout)
 
         self.params_group = QGroupBox("回测参数")
         params_layout = QGridLayout()
@@ -436,6 +514,48 @@ class MainWindow(QWidget):
         progress_layout.addWidget(self.log_box)
         self.progress_group.setLayout(progress_layout)
 
+        self.live_group = QGroupBox("实盘交易")
+        live_layout = QGridLayout()
+        self.live_mode_combo = QComboBox()
+        self.live_mode_combo.addItems(["DRY-RUN", "LIVE"])
+        self.live_env_combo = QComboBox()
+        self.live_env_combo.addItems(["Testnet", "Mainnet"])
+        self.live_max_notional = self._make_spin(0, 1_000_000, 10, 0, 200)
+        self.live_max_position = self._make_spin(0, 1_000_000, 10, 0, 500)
+        self.live_cooldown = self._make_spin(0, 3600, 1, 0, 60)
+        self.live_kill_switch = self._make_spin(1, 10, 1, 0, 3)
+        self.live_poll_seconds = self._make_spin(5, 600, 1, 0, 30)
+        self.live_start_btn = QPushButton("开始")
+        self.live_stop_btn = QPushButton("停止")
+        self.live_stop_btn.setEnabled(False)
+        self.live_warning = QLabel("主网实盘需输入 LIVE 确认")
+        self.live_warning.setStyleSheet("color: #c00000;")
+        self.live_tip = QLabel("模式说明：DRY-RUN=不下真实单，仅记录日志；LIVE=真实下单")
+        self.live_tip.setStyleSheet("color: #444444;")
+        self.live_log_box = QTextEdit()
+        self.live_log_box.setReadOnly(True)
+        live_layout.addWidget(QLabel("模式"), 0, 0)
+        live_layout.addWidget(self.live_mode_combo, 0, 1)
+        live_layout.addWidget(QLabel("环境"), 1, 0)
+        live_layout.addWidget(self.live_env_combo, 1, 1)
+        live_layout.addWidget(QLabel("max_notional_usdt"), 2, 0)
+        live_layout.addWidget(self.live_max_notional, 2, 1)
+        live_layout.addWidget(QLabel("max_position_usdt"), 3, 0)
+        live_layout.addWidget(self.live_max_position, 3, 1)
+        live_layout.addWidget(QLabel("cooldown_seconds"), 4, 0)
+        live_layout.addWidget(self.live_cooldown, 4, 1)
+        live_layout.addWidget(QLabel("kill_switch_max_errors"), 5, 0)
+        live_layout.addWidget(self.live_kill_switch, 5, 1)
+        live_layout.addWidget(QLabel("poll_seconds"), 6, 0)
+        live_layout.addWidget(self.live_poll_seconds, 6, 1)
+        live_layout.addWidget(self.live_start_btn, 7, 0)
+        live_layout.addWidget(self.live_stop_btn, 7, 1)
+        live_layout.addWidget(self.live_warning, 8, 0, 1, 2)
+        live_layout.addWidget(self.live_tip, 9, 0, 1, 2)
+        live_layout.addWidget(QLabel("实盘日志"), 10, 0, 1, 2)
+        live_layout.addWidget(self.live_log_box, 11, 0, 1, 2)
+        self.live_group.setLayout(live_layout)
+
         self.results_group = QGroupBox("结果")
         results_layout = QVBoxLayout()
         self.metrics_label = QLabel("等待回测")
@@ -473,8 +593,10 @@ class MainWindow(QWidget):
         self.results_group.setLayout(results_layout)
 
         content_layout.addWidget(self.connection_group)
+        content_layout.addWidget(self.account_group)
         content_layout.addWidget(self.params_group)
         content_layout.addWidget(self.progress_group)
+        content_layout.addWidget(self.live_group)
         content_layout.addWidget(self.results_group)
 
         scroll_area = QScrollArea()
@@ -489,6 +611,14 @@ class MainWindow(QWidget):
         self.load_btn.clicked.connect(self._on_load_config)
         self.symbol_combo.currentTextChanged.connect(self._on_symbol_change)
         self.export_btn.clicked.connect(self._on_export_results)
+        self.refresh_balance_btn.clicked.connect(self._on_refresh_balance)
+        self.env_combo.currentTextChanged.connect(self._on_env_changed)
+        self.account_env_combo.currentTextChanged.connect(self._on_account_env_changed)
+        self.live_env_combo.currentTextChanged.connect(self._on_live_env_changed)
+        self.live_mode_combo.currentTextChanged.connect(self._on_live_mode_changed)
+        self.live_start_btn.clicked.connect(self._on_live_start)
+        self.live_stop_btn.clicked.connect(self._on_live_stop)
+        self.api_key_input.textChanged.connect(lambda _: self.account_fingerprint.setText(self._api_fingerprint()))
 
     def _bind_state(self) -> None:
         self.state.log_signal.connect(self._append_log)
@@ -507,12 +637,57 @@ class MainWindow(QWidget):
         spin.setValue(value)
         return spin
 
+    def _api_fingerprint(self) -> str:
+        key = self.api_key_input.text().strip()
+        if not key:
+            return "-"
+        if len(key) <= 8:
+            return key
+        return f"{key[:4]}...{key[-4:]}"
+
+    def _sync_env(self, source: str) -> None:
+        if self._syncing_env:
+            return
+        self._syncing_env = True
+        try:
+            if source == "conn":
+                self.account_env_combo.setCurrentText(self.env_combo.currentText())
+            elif source == "account":
+                self.env_combo.setCurrentText(self.account_env_combo.currentText())
+            elif source == "live":
+                pass
+        finally:
+            self._syncing_env = False
+
+    def _on_env_changed(self, text: str) -> None:
+        self._sync_env("conn")
+        self.account_fingerprint.setText(self._api_fingerprint())
+
+    def _on_account_env_changed(self, text: str) -> None:
+        self._sync_env("account")
+
+    def _on_live_env_changed(self, text: str) -> None:
+        self._on_live_mode_changed(self.live_mode_combo.currentText())
+
+    def _on_live_mode_changed(self, text: str) -> None:
+        is_live = text == "LIVE"
+        is_mainnet = self.live_env_combo.currentText() == "Mainnet"
+        if is_live and is_mainnet:
+            self.live_warning.setText("主网实盘需输入 LIVE 确认")
+            self.live_warning.setStyleSheet("color: #c00000; font-weight: bold;")
+        else:
+            self.live_warning.setText("DRY-RUN 模式不会真实下单")
+            self.live_warning.setStyleSheet("color: #666666;")
+
     def _load_default_config(self) -> None:
         path = os.path.join("config", "default_config.json")
         if not os.path.exists(path):
             return
         with open(path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
+        env_text = "Testnet" if cfg.get("env", "mainnet") == "testnet" else "Mainnet"
+        self.env_combo.setCurrentText(env_text)
+        self.account_env_combo.setCurrentText(env_text)
         self.symbol_combo.setCurrentText(cfg["default_symbol"])
         self.trade_mode.setCurrentText("多空都做" if cfg.get("trade_mode", "both") == "both" else "只做多" if cfg.get("trade_mode") == "long_only" else "只做空")
         self.start_date.setDate(QDate.fromString(cfg["start_date"], "yyyy-MM-dd"))
@@ -550,6 +725,16 @@ class MainWindow(QWidget):
         self.entry_adx_period.setValue(v5.get("entry_adx_period", 14))
         self.entry_adx_min_long.setValue(v5.get("entry_adx_min_long", 20))
         self.entry_adx_min_short.setValue(v5.get("entry_adx_min_short", 25))
+
+        live = cfg.get("live", {})
+        self.live_mode_combo.setCurrentText(live.get("mode", "DRY-RUN"))
+        self.live_env_combo.setCurrentText("Mainnet" if live.get("environment") == "mainnet" else "Testnet")
+        self.live_max_notional.setValue(live.get("max_notional_usdt", 200))
+        self.live_max_position.setValue(live.get("max_position_usdt", 500))
+        self.live_cooldown.setValue(live.get("cooldown_seconds", 60))
+        self.live_kill_switch.setValue(live.get("kill_switch_max_errors", 3))
+        self.live_poll_seconds.setValue(live.get("poll_seconds", 30))
+        self._on_live_mode_changed(self.live_mode_combo.currentText())
 
     def _collect_config(self) -> Dict[str, object]:
         return {
@@ -599,6 +784,15 @@ class MainWindow(QWidget):
                 "entry_adx_min_long": float(self.entry_adx_min_long.value()),
                 "entry_adx_min_short": float(self.entry_adx_min_short.value()),
             },
+            "live": {
+                "mode": self.live_mode_combo.currentText(),
+                "environment": "mainnet" if self.live_env_combo.currentText() == "Mainnet" else "testnet",
+                "max_notional_usdt": float(self.live_max_notional.value()),
+                "max_position_usdt": float(self.live_max_position.value()),
+                "cooldown_seconds": int(self.live_cooldown.value()),
+                "kill_switch_max_errors": int(self.live_kill_switch.value()),
+                "poll_seconds": int(self.live_poll_seconds.value()),
+            },
         }
 
     def _on_symbol_change(self, symbol: str) -> None:
@@ -615,15 +809,15 @@ class MainWindow(QWidget):
         self.conn_status.setText("测试中...")
         api_key = self.api_key_input.text().strip()
         api_secret = self.api_secret_input.text().strip()
-        testnet = self.env_combo.currentText() == "Testnet"
+        environment = "testnet" if self.env_combo.currentText() == "Testnet" else "mainnet"
 
         self.api_thread = QThread(self)
-        worker = ApiTestWorker(api_key, api_secret, testnet)
-        worker.moveToThread(self.api_thread)
-        self.api_thread.started.connect(worker.run)
-        worker.finished.connect(self._on_api_test_result)
-        worker.finished.connect(worker.deleteLater)
-        worker.finished.connect(self.api_thread.quit)
+        self.api_worker = ApiTestWorker(api_key, api_secret, environment)
+        self.api_worker.moveToThread(self.api_thread)
+        self.api_thread.started.connect(self.api_worker.run)
+        self.api_worker.finished.connect(self._on_api_test_result)
+        self.api_worker.finished.connect(self.api_worker.deleteLater)
+        self.api_worker.finished.connect(self.api_thread.quit)
         self.api_thread.start()
 
     def _on_api_test_result(self, payload: Dict[str, object]) -> None:
@@ -638,6 +832,37 @@ class MainWindow(QWidget):
             f"耗时 {payload.get('elapsed_ms')} ms | 服务器时间 {server_dt} | "
             f"USDT 钱包 {payload.get('usdt_wallet')} | 可用 {payload.get('usdt_available')}"
         )
+        self.account_fingerprint.setText(self._api_fingerprint())
+
+    def _on_refresh_balance(self) -> None:
+        api_key = self.api_key_input.text().strip()
+        api_secret = self.api_secret_input.text().strip()
+        if not api_key or not api_secret:
+            self._append_log("缺少 API Key/Secret，无法查询余额")
+            return
+        environment = "testnet" if self.account_env_combo.currentText() == "Testnet" else "mainnet"
+        self.account_fingerprint.setText(self._api_fingerprint())
+        self.balance_thread = QThread(self)
+        self.balance_worker = BalanceWorker(api_key, api_secret, environment)
+        self.balance_worker.moveToThread(self.balance_thread)
+        self.balance_thread.started.connect(self.balance_worker.run)
+        self.balance_worker.finished.connect(self._on_balance_result)
+        self.balance_worker.finished.connect(self.balance_worker.deleteLater)
+        self.balance_worker.finished.connect(self.balance_thread.quit)
+        self.balance_thread.start()
+
+    def _on_balance_result(self, payload: Dict[str, object]) -> None:
+        if not payload.get("ok"):
+            self.account_wallet.setText("错误")
+            self.account_available.setText("-")
+            self.account_margin.setText("-")
+            self.account_unrealized.setText("-")
+            self._append_log(f"余额查询失败: {payload.get('error')}")
+            return
+        self.account_wallet.setText(f"{payload.get('walletBalance', 0):.4f}")
+        self.account_available.setText(f"{payload.get('availableBalance', 0):.4f}")
+        self.account_margin.setText(f"{payload.get('marginBalance', 0):.4f}")
+        self.account_unrealized.setText(f"{payload.get('unrealizedProfit', 0):.4f}")
 
     def _on_run(self) -> None:
         self.run_btn.setEnabled(False)
@@ -650,7 +875,7 @@ class MainWindow(QWidget):
             cfg,
             self.api_key_input.text().strip(),
             self.api_secret_input.text().strip(),
-            self.env_combo.currentText() == "Testnet",
+            "testnet" if self.env_combo.currentText() == "Testnet" else "mainnet",
             self.state,
         )
         self.worker.moveToThread(self.worker_thread)
@@ -678,6 +903,58 @@ class MainWindow(QWidget):
         self.last_export_paths = payload.get("paths")
         self.state.push_result(payload)
 
+    def _on_live_start(self) -> None:
+        if self.live_worker and self.live_thread and self.live_thread.isRunning():
+            self._append_live_log("实盘模块已在运行")
+            return
+        mode = self.live_mode_combo.currentText()
+        env_text = self.live_env_combo.currentText()
+        if not self.api_key_input.text().strip() or not self.api_secret_input.text().strip():
+            self._append_live_log("缺少 API Key/Secret，无法启动实盘")
+            return
+        if mode == "LIVE" and env_text == "Mainnet":
+            text, ok = QInputDialog.getText(self, "确认实盘", "输入 LIVE 以确认启动主网实盘：")
+            if not ok or text.strip() != "LIVE":
+                self._append_live_log("实盘确认失败，已取消启动")
+                return
+            QMessageBox.warning(self, "风险提示", "主网实盘已启动，请谨慎操作")
+        cfg = self._collect_config()
+        cfg["live"]["mode"] = mode
+        cfg["live"]["environment"] = "mainnet" if env_text == "Mainnet" else "testnet"
+        self.live_log_box.clear()
+        self.live_start_btn.setEnabled(False)
+        self.live_stop_btn.setEnabled(True)
+        self.live_thread = QThread(self)
+        self.live_worker = LiveWorker(
+            cfg,
+            self.api_key_input.text().strip(),
+            self.api_secret_input.text().strip(),
+            cfg["live"]["environment"],
+        )
+        self.live_worker.moveToThread(self.live_thread)
+        self.live_thread.started.connect(self.live_worker.run)
+        self.live_worker.log_signal.connect(self._append_live_log)
+        self.live_worker.finished.connect(self._on_live_finished)
+        self.live_worker.finished.connect(self.live_worker.deleteLater)
+        self.live_worker.finished.connect(self.live_thread.quit)
+        self.live_thread.start()
+
+    def _on_live_stop(self) -> None:
+        if self.live_worker:
+            self.live_worker.stop()
+        self.live_stop_btn.setEnabled(False)
+        self.live_start_btn.setEnabled(True)
+        self._append_live_log("已请求停止")
+
+    def _on_live_finished(self, payload: Dict[str, object]) -> None:
+        self.live_stop_btn.setEnabled(False)
+        self.live_start_btn.setEnabled(True)
+        if payload.get("stopped"):
+            self._append_live_log("实盘已停止")
+
+    def _append_live_log(self, text: str) -> None:
+        self.live_log_box.append(text)
+
     def _on_save_config(self) -> None:
         cfg = self._collect_config()
         path, _ = QFileDialog.getSaveFileName(self, "保存配置", "config.json", "JSON (*.json)")
@@ -694,6 +971,9 @@ class MainWindow(QWidget):
         with open(path, "r", encoding="utf-8") as f:
             cfg = json.load(f)
         self.symbol_combo.setCurrentText(cfg.get("symbol", "SOLUSDT"))
+        env_text = "Testnet" if cfg.get("env", "mainnet") == "testnet" else "Mainnet"
+        self.env_combo.setCurrentText(env_text)
+        self.account_env_combo.setCurrentText(env_text)
         mode = cfg.get("trade_mode", "both")
         if mode == "long_only":
             self.trade_mode.setCurrentText("只做多")
@@ -737,6 +1017,16 @@ class MainWindow(QWidget):
         self.entry_adx_period.setValue(v5.get("entry_adx_period", 14))
         self.entry_adx_min_long.setValue(v5.get("entry_adx_min_long", 20))
         self.entry_adx_min_short.setValue(v5.get("entry_adx_min_short", 25))
+
+        live = cfg.get("live", {})
+        self.live_mode_combo.setCurrentText(live.get("mode", "DRY-RUN"))
+        self.live_env_combo.setCurrentText("Mainnet" if live.get("environment") == "mainnet" else "Testnet")
+        self.live_max_notional.setValue(live.get("max_notional_usdt", 200))
+        self.live_max_position.setValue(live.get("max_position_usdt", 500))
+        self.live_cooldown.setValue(live.get("cooldown_seconds", 60))
+        self.live_kill_switch.setValue(live.get("kill_switch_max_errors", 3))
+        self.live_poll_seconds.setValue(live.get("poll_seconds", 30))
+        self._on_live_mode_changed(self.live_mode_combo.currentText())
 
         self._append_log(f"已加载配置: {path}")
 
