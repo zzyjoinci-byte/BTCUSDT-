@@ -21,6 +21,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QProgressBar,
     QScrollArea,
+    QCheckBox,
     QTableWidget,
     QTableWidgetItem,
     QTextEdit,
@@ -202,7 +203,7 @@ class BacktestWorker(QObject):
             return
         self.state.log(f"时间周期自检通过: {detail}")
 
-        exec_df = prepare_exec_frame(exec_df, cfg["v5"])
+        exec_df = prepare_exec_frame(exec_df, cfg["v5"], exec_tf)
         if filter_tf != exec_tf:
             filter_df = resample_ohlcv(exec_df, filter_tf)
         else:
@@ -230,7 +231,14 @@ class BacktestWorker(QObject):
 
         self.state.set_phase("生成报表/绘图")
         self.state.log("生成报表与图表")
-        report = summarize(trades_df, equity_df, result.get("counters", {}), cfg, symbol)
+        report = summarize(
+            trades_df,
+            equity_df,
+            result.get("counters", {}),
+            cfg,
+            symbol,
+            result.get("adx_4h_quantiles"),
+        )
         output_prefix = os.path.join("outputs", symbol)
         export_paths = export_results(trades_df, equity_df, report, output_prefix)
 
@@ -372,6 +380,10 @@ class MainWindow(QWidget):
         self.tp2_action.addItems(["tighten_stop"])
         self.tighten_to = QComboBox()
         self.tighten_to.addItems(["mid", "atr_trail"])
+        self.entry_adx_enabled = QCheckBox()
+        self.entry_adx_period = self._make_spin(2, 50, 1, 0, 14)
+        self.entry_adx_min_long = self._make_spin(0, 100, 1, 0, 20)
+        self.entry_adx_min_short = self._make_spin(0, 100, 1, 0, 25)
 
         v5_items = [
             ("RSI", self.rsi_len),
@@ -393,6 +405,10 @@ class MainWindow(QWidget):
             ("TP2 hold", self.tp2_hold),
             ("TP2 action", self.tp2_action),
             ("Tighten to", self.tighten_to),
+            ("ADX入场过滤", self.entry_adx_enabled),
+            ("ADX周期", self.entry_adx_period),
+            ("ADX多头阈值", self.entry_adx_min_long),
+            ("ADX空头阈值", self.entry_adx_min_short),
         ]
         for idx, (label, widget) in enumerate(v5_items):
             v5_layout.addWidget(QLabel(label), idx, 0)
@@ -530,6 +546,10 @@ class MainWindow(QWidget):
         self.tp2_hold.setValue(v5["tp2_invalid_min_hold_bars"])
         self.tp2_action.setCurrentText(v5["tp2_invalid_action"])
         self.tighten_to.setCurrentText(v5["tighten_to"])
+        self.entry_adx_enabled.setChecked(v5.get("entry_adx_filter_enabled", True))
+        self.entry_adx_period.setValue(v5.get("entry_adx_period", 14))
+        self.entry_adx_min_long.setValue(v5.get("entry_adx_min_long", 20))
+        self.entry_adx_min_short.setValue(v5.get("entry_adx_min_short", 25))
 
     def _collect_config(self) -> Dict[str, object]:
         return {
@@ -574,6 +594,10 @@ class MainWindow(QWidget):
                 "tp2_invalid_min_hold_bars": int(self.tp2_hold.value()),
                 "tp2_invalid_action": self.tp2_action.currentText(),
                 "tighten_to": self.tighten_to.currentText(),
+                "entry_adx_filter_enabled": self.entry_adx_enabled.isChecked(),
+                "entry_adx_period": int(self.entry_adx_period.value()),
+                "entry_adx_min_long": float(self.entry_adx_min_long.value()),
+                "entry_adx_min_short": float(self.entry_adx_min_short.value()),
             },
         }
 
@@ -709,6 +733,10 @@ class MainWindow(QWidget):
         self.tp2_hold.setValue(v5.get("tp2_invalid_min_hold_bars", 16))
         self.tp2_action.setCurrentText(v5.get("tp2_invalid_action", "tighten_stop"))
         self.tighten_to.setCurrentText(v5.get("tighten_to", "mid"))
+        self.entry_adx_enabled.setChecked(v5.get("entry_adx_filter_enabled", True))
+        self.entry_adx_period.setValue(v5.get("entry_adx_period", 14))
+        self.entry_adx_min_long.setValue(v5.get("entry_adx_min_long", 20))
+        self.entry_adx_min_short.setValue(v5.get("entry_adx_min_short", 25))
 
         self._append_log(f"已加载配置: {path}")
 

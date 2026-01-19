@@ -38,6 +38,10 @@
     "tp2_invalid_min_pnl_pct_short": 0.008,
     "tp2_invalid_min_hold_bars": 16,
     "tp2_invalid_action": "tighten_stop",
-    "tighten_to": "mid"
+    "tighten_to": "mid",
+    "entry_adx_filter_enabled": true,
+    "entry_adx_period": 14,
+    "entry_adx_min_long": 20,
+    "entry_adx_min_short": 25
   }
 }
