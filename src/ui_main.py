@@ -116,6 +116,68 @@ class LiveWorker(QObject):
         self.finished.emit(result or {"stopped": True})
 
 
+class TestOrderWorker(QObject):
+    finished = Signal(dict)
+
+    def __init__(self, api_key: str, api_secret: str, environment: str, symbol: str, side: str, notional_usdt: float, leverage: int) -> None:
+        super().__init__()
+        self.api_key = api_key
+        self.api_secret = api_secret
+        self.environment = environment
+        self.symbol = symbol
+        self.side = side
+        self.notional_usdt = notional_usdt
+        self.leverage = leverage
+
+    def run(self) -> None:
+        try:
+            api = BinanceAPI(self.api_key, self.api_secret, self.environment)
+            exchange_info = api.get_exchange_info(self.symbol)
+            min_qty = exchange_info.get("min_qty", 0.0)
+            step_size = exchange_info.get("step_size", 0.0)
+            min_notional = exchange_info.get("min_notional", 0.0)
+            precision = exchange_info.get("precision", 8)
+
+            try:
+                api.set_leverage(self.symbol, self.leverage)
+            except Exception as lev_exc:  # noqa: BLE001
+                self.finished.emit({"ok": False, "error": f"设置杠杆失败: {lev_exc}"})
+                return
+
+            klines = api.fetch_klines_latest(self.symbol, "1m", limit=1)
+            if not klines:
+                self.finished.emit({"ok": False, "error": "无法获取价格"})
+                return
+            price = float(klines[0]["close"])
+
+            qty = self.notional_usdt / price
+
+            if min_notional > 0 and self.notional_usdt < min_notional:
+                qty = min_notional / price
+                self.notional_usdt = min_notional
+
+            if min_qty > 0 and qty < min_qty:
+                qty = min_qty
+
+            if step_size > 0:
+                qty = (qty // step_size) * step_size
+
+            qty = round(qty, precision)
+            if qty <= 0:
+                self.finished.emit({"ok": False, "error": f"计算数量无效: qty={qty}, min_qty={min_qty}, min_notional={min_notional}"})
+                return
+
+            actual_notional = qty * price
+            if min_notional > 0 and actual_notional < min_notional:
+                self.finished.emit({"ok": False, "error": f"名义金额不足: {actual_notional:.2f} < {min_notional:.2f} USDT"})
+                return
+
+            result = api.place_order(self.symbol, side=self.side, quantity=qty, order_type="MARKET")
+            self.finished.emit({"ok": True, "result": result, "symbol": self.symbol, "side": self.side, "qty": qty, "price": price, "notional": actual_notional})
+        except Exception as exc:  # noqa: BLE001
+            self.finished.emit({"ok": False, "error": str(exc)})
+
+
 class BacktestWorker(QObject):
     finished = Signal(dict)
 
@@ -315,6 +377,8 @@ class MainWindow(QWidget):
         self.balance_worker: Optional[BalanceWorker] = None
         self.live_thread: Optional[QThread] = None
         self.live_worker: Optional[LiveWorker] = None
+        self.test_order_thread: Optional[QThread] = None
+        self.test_order_worker: Optional[TestOrderWorker] = None
         self._syncing_env = False
         self.last_export_paths = None
         self.spinner_frames = ["|", "/", "-", "\\"]
@@ -380,7 +444,7 @@ class MainWindow(QWidget):
         self.params_group = QGroupBox("回测参数")
         params_layout = QGridLayout()
         self.symbol_combo = QComboBox()
-        self.symbol_combo.addItems(["BTCUSDT", "SOLUSDT"])
+        self.symbol_combo.addItems(["BTCUSDT", "SOLUSDT", "DOGEUSDT", "BNBUSDT"])
         self.trade_mode = QComboBox()
         self.trade_mode.addItems(["多空都做", "只做多", "只做空"])
         self.start_date = QDateEdit()
@@ -554,6 +618,28 @@ class MainWindow(QWidget):
         live_layout.addWidget(self.live_tip, 9, 0, 1, 2)
         live_layout.addWidget(QLabel("实盘日志"), 10, 0, 1, 2)
         live_layout.addWidget(self.live_log_box, 11, 0, 1, 2)
+
+        test_order_box = QGroupBox("手动测试开仓")
+        test_order_layout = QGridLayout()
+        self.test_symbol_combo = QComboBox()
+        self.test_symbol_combo.addItems(["DOGEUSDT", "BNBUSDT", "BTCUSDT", "SOLUSDT"])
+        self.test_side_combo = QComboBox()
+        self.test_side_combo.addItems(["BUY", "SELL"])
+        self.test_env_combo = QComboBox()
+        self.test_env_combo.addItems(["Testnet", "Mainnet"])
+        self.test_order_btn = QPushButton("测试开仓 (10 USDT, 3x)")
+        self.test_order_status = QLabel("未测试")
+        test_order_layout.addWidget(QLabel("币对"), 0, 0)
+        test_order_layout.addWidget(self.test_symbol_combo, 0, 1)
+        test_order_layout.addWidget(QLabel("方向"), 1, 0)
+        test_order_layout.addWidget(self.test_side_combo, 1, 1)
+        test_order_layout.addWidget(QLabel("环境"), 2, 0)
+        test_order_layout.addWidget(self.test_env_combo, 2, 1)
+        test_order_layout.addWidget(self.test_order_btn, 3, 0)
+        test_order_layout.addWidget(self.test_order_status, 3, 1)
+        test_order_box.setLayout(test_order_layout)
+        live_layout.addWidget(test_order_box, 12, 0, 1, 2)
+
         self.live_group.setLayout(live_layout)
 
         self.results_group = QGroupBox("结果")
@@ -618,6 +704,7 @@ class MainWindow(QWidget):
         self.live_mode_combo.currentTextChanged.connect(self._on_live_mode_changed)
         self.live_start_btn.clicked.connect(self._on_live_start)
         self.live_stop_btn.clicked.connect(self._on_live_stop)
+        self.test_order_btn.clicked.connect(self._on_test_order)
         self.api_key_input.textChanged.connect(lambda _: self.account_fingerprint.setText(self._api_fingerprint()))
 
     def _bind_state(self) -> None:
@@ -954,6 +1041,64 @@ class MainWindow(QWidget):
 
     def _append_live_log(self, text: str) -> None:
         self.live_log_box.append(text)
+
+    def _on_test_order(self) -> None:
+        if not self.api_key_input.text().strip() or not self.api_secret_input.text().strip():
+            self.test_order_status.setText("错误: 缺少 API Key/Secret")
+            return
+        symbol = self.test_symbol_combo.currentText()
+        side = self.test_side_combo.currentText()
+        environment = "testnet" if self.test_env_combo.currentText() == "Testnet" else "mainnet"
+        notional_usdt = 10.0
+        leverage = 3
+
+        if environment == "mainnet":
+            reply = QMessageBox.question(
+                self,
+                "确认主网测试",
+                f"即将在主网 {symbol} 开{side}单，成本约 {notional_usdt} USDT，3倍杠杆。\n确认继续？",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.No,
+            )
+            if reply != QMessageBox.Yes:
+                self.test_order_status.setText("已取消")
+                return
+
+        self.test_order_status.setText("下单中...")
+        self.test_order_btn.setEnabled(False)
+        self.test_order_thread = QThread(self)
+        self.test_order_worker = TestOrderWorker(
+            self.api_key_input.text().strip(),
+            self.api_secret_input.text().strip(),
+            environment,
+            symbol,
+            side,
+            notional_usdt,
+            leverage,
+        )
+        self.test_order_worker.moveToThread(self.test_order_thread)
+        self.test_order_thread.started.connect(self.test_order_worker.run)
+        self.test_order_worker.finished.connect(self._on_test_order_result)
+        self.test_order_worker.finished.connect(self.test_order_worker.deleteLater)
+        self.test_order_worker.finished.connect(self.test_order_thread.quit)
+        self.test_order_thread.start()
+
+    def _on_test_order_result(self, payload: Dict[str, object]) -> None:
+        self.test_order_btn.setEnabled(True)
+        if not payload.get("ok"):
+            error_msg = payload.get("error", "未知错误")
+            self.test_order_status.setText(f"失败: {error_msg}")
+            self._append_live_log(f"测试开仓失败: {error_msg}")
+            return
+        result = payload.get("result", {})
+        order_id = result.get("orderId", "N/A")
+        notional = payload.get("notional", payload.get("qty", 0) * payload.get("price", 0))
+        self.test_order_status.setText(f"成功: orderId={order_id}")
+        self._append_live_log(
+            f"测试开仓成功: {payload.get('symbol')} {payload.get('side')} "
+            f"qty={payload.get('qty', 0):.6f} price={payload.get('price', 0):.4f} "
+            f"notional={notional:.2f} USDT orderId={order_id}"
+        )
 
     def _on_save_config(self) -> None:
         cfg = self._collect_config()

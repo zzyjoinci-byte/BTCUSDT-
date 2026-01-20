@@ -104,6 +104,25 @@ class BinanceAPI:
     def cancel_order(self, symbol: str, order_id: int) -> Dict[str, object]:
         return self._call(self.client.futures_cancel_order, symbol=symbol, orderId=order_id)
 
+    def set_leverage(self, symbol: str, leverage: int) -> Dict[str, object]:
+        return self._call(self.client.futures_change_leverage, symbol=symbol, leverage=leverage)
+
+    def get_exchange_info(self, symbol: str) -> Dict[str, object]:
+        info = self._call(self.client.futures_exchange_info)
+        for s in info.get("symbols", []):
+            if s.get("symbol") == symbol:
+                filters = {f["filterType"]: f for f in s.get("filters", [])}
+                lot_size = filters.get("LOT_SIZE", {})
+                min_notional = filters.get("MIN_NOTIONAL", {})
+                return {
+                    "min_qty": float(lot_size.get("minQty", 0)),
+                    "max_qty": float(lot_size.get("maxQty", 0)),
+                    "step_size": float(lot_size.get("stepSize", 0)),
+                    "min_notional": float(min_notional.get("notional", 0)),
+                    "precision": int(s.get("quantityPrecision", 8)),
+                }
+        return {"min_qty": 0.0, "max_qty": 0.0, "step_size": 0.0, "min_notional": 0.0, "precision": 8}
+
     def get_position(self, symbol: str) -> Dict[str, object]:
         positions = self._call(self.client.futures_position_information, symbol=symbol)
         if not positions:
@@ -205,6 +224,12 @@ class BinanceAPI:
                 return "时间戳错误，请检查系统时间"
             if code == -1003:
                 return "请求过于频繁，请稍后再试"
+            if code == -1000:
+                return f"API错误(-1000): {msg}。可能原因：数量精度不符合要求、数量低于最小值、名义金额不足"
+            if code == -1111:
+                return f"数量精度错误: {msg}。请检查币对的最小数量和步长"
+            if code == -4164:
+                return f"最小名义金额不足: {msg}"
             return f"API错误({code}): {msg}"
         if isinstance(exc, BinanceRequestException):
             return f"网络请求错误: {exc}"

@@ -1,6 +1,6 @@
 {
   "env": "testnet",
-  "symbols": ["BTCUSDT", "SOLUSDT"],
+  "symbols": ["BTCUSDT", "SOLUSDT", "DOGEUSDT", "BNBUSDT"],
   "default_symbol": "SOLUSDT",
   "trade_mode": "both",
   "start_date": "2022-01-01",
